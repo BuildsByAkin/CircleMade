@@ -1,0 +1,1 @@
+We are building a mobile app using react native Expo that allows users to write letters, attach short videos or images, and have those letters printed and mailed physically to their recipients.

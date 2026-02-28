@@ -1,0 +1,120 @@
+.comparison {
+  padding: var(--space-4xl) var(--space-xl);
+  background-color: var(--color-bg-warm);
+}
+
+.comparison-content {
+  max-width: 880px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--space-2xl);
+}
+
+.comparison-title {
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 800;
+  color: var(--color-text-primary);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  margin: 0;
+}
+
+.comparison-cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-lg);
+  width: 100%;
+}
+
+.comparison-card {
+  padding: var(--space-xl);
+  border-radius: var(--radius-xl);
+  text-align: left;
+}
+
+.comparison-card--traditional {
+  background-color: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+}
+
+.comparison-card--pinwall {
+  background-color: var(--color-text-primary);
+  color: var(--color-text-inverse);
+}
+
+.comparison-card-heading {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin: 0 0 var(--space-lg);
+  line-height: 1.3;
+}
+
+.comparison-card--traditional .comparison-card-heading {
+  color: var(--color-text-secondary);
+}
+
+.comparison-card--pinwall .comparison-card-heading {
+  color: var(--color-accent);
+}
+
+.comparison-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.comparison-item {
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+.comparison-item::before {
+  flex-shrink: 0;
+  font-size: 0.75rem;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-weight: 700;
+}
+
+.comparison-item--negative {
+  color: var(--color-text-secondary);
+}
+
+.comparison-item--negative::before {
+  content: '✕';
+  color: var(--color-text-tertiary);
+  background-color: var(--color-bg-warm);
+}
+
+.comparison-item--positive {
+  color: var(--color-text-inverse);
+}
+
+.comparison-item--positive::before {
+  content: '✓';
+  color: var(--color-bg-dark);
+  background-color: var(--color-accent);
+}
+
+@media (max-width: 640px) {
+  .comparison {
+    padding: var(--space-3xl) var(--space-lg);
+  }
+
+  .comparison-cards {
+    grid-template-columns: 1fr;
+  }
+}

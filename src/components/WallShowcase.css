@@ -1,0 +1,272 @@
+.wall-showcase {
+  padding: var(--space-3xl) var(--space-xl);
+  background-color: var(--color-bg-primary);
+}
+
+.showcase-container {
+  max-width: 1280px;
+  margin: 0 auto;
+}
+
+.showcase-card {
+  background-color: var(--color-bg-dark);
+  border-radius: 32px;
+  padding: var(--space-2xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.card-inner {
+  background-color: var(--color-bg-inner);
+  border-radius: 24px;
+  padding: var(--space-xl);
+  overflow: hidden;
+}
+
+.photos-and-phone {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--space-md);
+  min-height: 550px;
+  padding: var(--space-xl) 0;
+}
+
+.side-photos {
+  display: flex;
+  gap: var(--space-md);
+  align-items: flex-start;
+}
+
+.photo-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 140px;
+}
+
+.side-photo {
+  width: 100%;
+  height: 180px;
+  border-radius: 12px;
+  object-fit: cover;
+  border: 4px solid var(--color-bg-secondary);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.15);
+  transition: transform 0.3s ease;
+}
+
+.photo-caption {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  text-align: center;
+  font-weight: 600;
+  margin: 0;
+  line-height: 1.3;
+  max-width: 100%;
+  font-family: inherit;
+}
+
+.photo-1-wrap { transform: rotate(-3deg); margin-top: 20px; }
+.photo-2-wrap { transform: rotate(2deg); margin-top: -10px; }
+.photo-3-wrap { transform: rotate(-1deg); margin-top: 30px; }
+.photo-4-wrap { transform: rotate(4deg); margin-top: -5px; }
+.photo-5-wrap { transform: rotate(-2deg); margin-top: 25px; }
+.photo-6-wrap { transform: rotate(3deg); margin-top: 0px; }
+
+.phone-wrapper {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.phone-screenshot {
+  max-width: 100%;
+  height: auto;
+  width: 350px;
+  border-radius: 0;
+  display: block;
+}
+
+.card-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  padding: 0 var(--space-lg);
+}
+
+.card-title {
+  font-size: 2.5rem;
+  font-weight: 700;
+  color: var(--color-text-inverse);
+  margin: 0;
+  line-height: 1.2;
+}
+
+.card-description {
+  font-size: 1.125rem;
+  color: var(--color-text-tertiary);
+  line-height: 1.6;
+  margin: 0;
+  max-width: 540px;
+}
+
+.card-description-accent {
+  font-size: 1rem;
+  color: var(--color-text-inverse);
+  font-weight: 600;
+  margin: 0;
+}
+
+.card-micro-bullets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-lg);
+  list-style: none;
+  padding: 0;
+  margin: var(--space-sm) 0 0;
+}
+
+.card-micro-bullets li {
+  font-size: 0.875rem;
+  color: var(--color-text-tertiary);
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.card-micro-bullets li::before {
+  content: '·';
+  font-weight: 700;
+  font-size: 1.25rem;
+  line-height: 1;
+  color: var(--color-accent);
+}
+
+@media (max-width: 1400px) {
+  .photo-container {
+    width: 120px;
+  }
+  .side-photo {
+    height: 160px;
+  }
+}
+
+@media (max-width: 1200px) {
+  .photo-container {
+    width: 100px;
+  }
+  
+  .side-photo {
+    height: 140px;
+  }
+
+  .phone-screenshot {
+    width: 300px;
+  }
+}
+
+@media (max-width: 1024px) {
+  .showcase-card {
+    padding: var(--space-xl);
+  }
+
+  .photos-and-phone {
+    gap: var(--space-xs);
+    min-height: 450px;
+  }
+
+  .side-photos {
+    gap: var(--space-xs);
+  }
+
+  .photo-container {
+    width: 80px;
+  }
+
+  .side-photo {
+    height: 110px;
+    border-width: 2px;
+  }
+
+  .phone-screenshot {
+    width: 250px;
+  }
+
+  .card-title {
+    font-size: 2rem;
+  }
+}
+
+@media (max-width: 850px) {
+  .photos-and-phone {
+    flex-direction: column;
+    min-height: auto;
+    padding: var(--space-lg) 0;
+    gap: var(--space-lg);
+  }
+
+  .side-photos {
+    flex-direction: row;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    order: 1;
+  }
+
+  .right-photos {
+    display: none;
+  }
+
+  .phone-wrapper {
+    order: 0;
+  }
+
+  .photo-container {
+    width: 90px;
+  }
+
+  .side-photo {
+    height: 110px;
+    border-width: 2px;
+  }
+
+  .photo-caption {
+    font-size: 0.65rem;
+  }
+
+  .photo-1-wrap,
+  .photo-2-wrap,
+  .photo-3-wrap,
+  .photo-4-wrap,
+  .photo-5-wrap,
+  .photo-6-wrap {
+    margin-top: 0;
+  }
+
+  .phone-screenshot {
+    width: 220px;
+  }
+
+  .wall-showcase {
+    padding: var(--space-3xl) var(--space-lg);
+  }
+
+  .showcase-card {
+    padding: var(--space-lg);
+  }
+
+  .card-text {
+    padding: 0;
+  }
+
+  .card-title {
+    font-size: 1.75rem;
+  }
+
+  .card-description {
+    font-size: 1rem;
+  }
+}
