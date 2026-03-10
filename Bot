@@ -1,0 +1,1137 @@
+//+------------------------------------------------------------------+
+//|              Au Gold Flipper v6 - Smart Recovery                 |
+//|   Phase Logic: Attack -> Pressure -> Scout -> Defense ->         |
+//|   Recovery -> Escape                                             |
+//+------------------------------------------------------------------+
+#property strict
+
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+//====================================================
+// INPUTS
+//====================================================
+input double   Sar_Step                  = 0.02;
+input double   Sar_Maximum               = 0.2;
+
+input double   BaseLots                  = 0.01;
+input int      InitialBasketTrades       = 10;
+
+input int      PressureConfirmBars       = 2;       // minimum bars after flip
+input double   MinDistancePoints         = 120;     // price must move this far against avg
+input bool     UseATRFilter              = true;
+input int      ATRPeriod                 = 14;
+input double   MinATRPoints              = 80;      // optional volatility threshold
+
+input int      ScoutTrades               = 2;       // small opposite probe
+input double   ScoutLotsMultiplier       = 0.50;    // scout lots = BaseLots * multiplier
+
+input int      DefenseTrades             = 5;       // partial hedge
+input double   DefenseLotsMultiplier     = 1.00;    // defense lots = BaseLots * multiplier
+
+input double   RecoveryTriggerDollars    = 3.0;     // defense side profit needed before cleanup
+input double   WorstTradeCloseBuffer     = 0.50;    // keep some profit cushion before closing bad trade
+input int      MaxWorstTradesPerBar      = 2;       // avoid over-closing in one bar
+
+input double   EscapeNetProfit           = 10.0;    // full basket close target
+input int      EscapeRemainingOriginal   = 2;       // if original side reduced to this, flatten if net >= 0
+input double   EscapeSmallNetProfit      = 0.0;     // flatten when damage mostly cleaned up
+
+input double   HardBasketStop            = -100.0;  // safety stop for all EA positions
+input int      SlippagePoints            = 20;
+input int      Magic                     = 1111111;
+
+//====================================================
+// GLOBALS
+//====================================================
+int sarHandle = INVALID_HANDLE;
+int atrHandle = INVALID_HANDLE;
+datetime lastBarTime = 0;
+
+//====================================================
+// STATE MACHINE
+//====================================================
+enum EAState
+{
+   STATE_IDLE = 0,
+   STATE_ATTACK,
+   STATE_PRESSURE,
+   STATE_SCOUT,
+   STATE_DEFENSE,
+   STATE_RECOVERY,
+   STATE_ESCAPE
+};
+
+EAState state = STATE_IDLE;
+
+// main directional memory
+int initialDir = 0;               // 1=buy, -1=sell
+int oppositeDir = 0;              // opposite side during pressure/scout/defense
+datetime pressureStartBarTime = 0;
+int pressureBarsCount = 0;
+
+// control flags
+bool scoutOpened = false;
+bool defenseOpened = false;
+
+//====================================================
+// HELPERS
+//====================================================
+string StateToString(EAState s)
+{
+   switch(s)
+   {
+      case STATE_IDLE:     return "IDLE";
+      case STATE_ATTACK:   return "ATTACK";
+      case STATE_PRESSURE: return "PRESSURE";
+      case STATE_SCOUT:    return "SCOUT";
+      case STATE_DEFENSE:  return "DEFENSE";
+      case STATE_RECOVERY: return "RECOVERY";
+      case STATE_ESCAPE:   return "ESCAPE";
+   }
+   return "UNKNOWN";
+}
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   sarHandle = iSAR(_Symbol, _Period, Sar_Step, Sar_Maximum);
+   if(sarHandle == INVALID_HANDLE)
+   {
+      Print("Failed to create SAR handle.");
+      return INIT_FAILED;
+   }
+
+   atrHandle = iATR(_Symbol, _Period, ATRPeriod);
+   if(atrHandle == INVALID_HANDLE)
+   {
+      Print("Failed to create ATR handle.");
+      return INIT_FAILED;
+   }
+
+   trade.SetExpertMagicNumber(Magic);
+   trade.SetDeviationInPoints(SlippagePoints);
+
+   lastBarTime = iTime(_Symbol, _Period, 0);
+
+   // restart detection
+   int buys = 0, sells = 0;
+   CountBuySell(buys, sells);
+
+   if(buys == 0 && sells == 0)
+   {
+      state = STATE_IDLE;
+      initialDir = 0;
+      oppositeDir = 0;
+      scoutOpened = false;
+      defenseOpened = false;
+   }
+   else
+   {
+      if(buys > 0 && sells == 0)
+      {
+         initialDir = 1;
+         state = STATE_ATTACK;
+      }
+      else if(sells > 0 && buys == 0)
+      {
+         initialDir = -1;
+         state = STATE_ATTACK;
+      }
+      else
+      {
+         // both sides exist on restart — assume recovery/defense situation
+         if(buys >= sells)
+         {
+            initialDir = 1;
+            oppositeDir = -1;
+         }
+         else
+         {
+            initialDir = -1;
+            oppositeDir = 1;
+         }
+
+         scoutOpened = true;
+         defenseOpened = true;
+         state = STATE_RECOVERY;
+      }
+
+      Print("Restart detected. State=", StateToString(state),
+            " initialDir=", initialDir,
+            " oppositeDir=", oppositeDir);
+   }
+
+   Print("Au Gold Flipper v6 initialized.");
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   if(sarHandle != INVALID_HANDLE)
+      IndicatorRelease(sarHandle);
+
+   if(atrHandle != INVALID_HANDLE)
+      IndicatorRelease(atrHandle);
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick                                                      |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   int totalPositions = CountMyPositions();
+   double netProfit = GetBasketProfit();
+
+   //========================================
+   // HARD SAFETY STOP EVERY TICK
+   //========================================
+   if(totalPositions > 0 && netProfit <= HardBasketStop)
+   {
+      Print("Hard basket stop hit: ", netProfit, ". Closing all.");
+      CloseAllPositions();
+      ResetState();
+      return;
+   }
+
+   //========================================
+   // FULL BASKET PROFIT EXIT EVERY TICK
+   //========================================
+   if(totalPositions > 0 && netProfit >= EscapeNetProfit)
+   {
+      Print("EscapeNetProfit reached: ", netProfit, ". Closing all.");
+      CloseAllPositions();
+      ResetState();
+      return;
+   }
+
+   //========================================
+   // NEW BAR LOGIC ONLY
+   //========================================
+   datetime currentBarTime = iTime(_Symbol, _Period, 0);
+   if(currentBarTime == lastBarTime)
+      return;
+
+   lastBarTime = currentBarTime;
+
+   int signal = GetClosedBarSignal();
+   if(signal == 0)
+      return;
+
+   double atrPoints = GetATRPoints();
+
+   Print("New bar | State=", StateToString(state),
+         " | Signal=", signal,
+         " | ATR pts=", atrPoints,
+         " | Net=", GetBasketProfit());
+
+   switch(state)
+   {
+      case STATE_IDLE:
+         HandleIdle(signal);
+         break;
+
+      case STATE_ATTACK:
+         HandleAttack(signal);
+         break;
+
+      case STATE_PRESSURE:
+         HandlePressure(signal, atrPoints);
+         break;
+
+      case STATE_SCOUT:
+         HandleScout(signal, atrPoints);
+         break;
+
+      case STATE_DEFENSE:
+         HandleDefense(signal);
+         break;
+
+      case STATE_RECOVERY:
+         HandleRecovery(signal);
+         break;
+
+      case STATE_ESCAPE:
+         HandleEscape(signal);
+         break;
+   }
+}
+
+//====================================================
+// STATE HANDLERS
+//====================================================
+
+//+------------------------------------------------------------------+
+//| STATE_IDLE                                                       |
+//+------------------------------------------------------------------+
+void HandleIdle(int signal)
+{
+   if(CountMyPositions() > 0)
+      return;
+
+   if(signal == 1)
+   {
+      int opened = OpenBasket(ORDER_TYPE_BUY, InitialBasketTrades, BaseLots, "Initial Buy");
+      if(opened > 0)
+      {
+         initialDir = 1;
+         oppositeDir = -1;
+         state = STATE_ATTACK;
+         scoutOpened = false;
+         defenseOpened = false;
+         Print("Entered ATTACK with BUY basket. Trades=", opened);
+      }
+   }
+   else if(signal == -1)
+   {
+      int opened = OpenBasket(ORDER_TYPE_SELL, InitialBasketTrades, BaseLots, "Initial Sell");
+      if(opened > 0)
+      {
+         initialDir = -1;
+         oppositeDir = 1;
+         state = STATE_ATTACK;
+         scoutOpened = false;
+         defenseOpened = false;
+         Print("Entered ATTACK with SELL basket. Trades=", opened);
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| STATE_ATTACK                                                     |
+//+------------------------------------------------------------------+
+void HandleAttack(int signal)
+{
+   int total = CountMyPositions();
+   if(total == 0)
+   {
+      ResetState();
+      return;
+   }
+
+   // If signal still agrees with original basket, keep attacking
+   if(signal == initialDir)
+      return;
+
+   // Signal flipped against us -> move to pressure mode
+   pressureStartBarTime = iTime(_Symbol, _Period, 1);
+   pressureBarsCount = 1;
+   state = STATE_PRESSURE;
+
+   Print("ATTACK -> PRESSURE. Flip detected against initialDir=", initialDir);
+}
+
+//+------------------------------------------------------------------+
+//| STATE_PRESSURE                                                   |
+//+------------------------------------------------------------------+
+void HandlePressure(int signal, double atrPoints)
+{
+   int total = CountMyPositions();
+   if(total == 0)
+   {
+      ResetState();
+      return;
+   }
+
+   // If flip disappeared, go back to attack
+   if(signal == initialDir)
+   {
+      state = STATE_ATTACK;
+      pressureBarsCount = 0;
+      Print("PRESSURE cancelled. Signal returned to initial direction.");
+      return;
+   }
+
+   pressureBarsCount++;
+
+   // Need minimum confirmation bars
+   if(pressureBarsCount < PressureConfirmBars)
+   {
+      Print("PRESSURE waiting. Bars=", pressureBarsCount,
+            "/", PressureConfirmBars);
+      return;
+   }
+
+   // Need price distance away from original basket avg
+   double avgInitial = GetAveragePriceByDirection(initialDir);
+   if(avgInitial <= 0.0)
+   {
+      Print("PRESSURE error: avgInitial invalid.");
+      return;
+   }
+
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double currentPrice = (initialDir == 1 ? bid : ask);
+
+   double adversePoints = 0.0;
+   if(initialDir == 1)
+      adversePoints = (avgInitial - currentPrice) / _Point;
+   else
+      adversePoints = (currentPrice - avgInitial) / _Point;
+
+   if(adversePoints < MinDistancePoints)
+   {
+      Print("PRESSURE waiting for distance. Current=", adversePoints,
+            " required=", MinDistancePoints);
+      return;
+   }
+
+   // Optional ATR filter
+   if(UseATRFilter && atrPoints < MinATRPoints)
+   {
+      Print("PRESSURE blocked by ATR filter. ATR=", atrPoints,
+            " required=", MinATRPoints);
+      return;
+   }
+
+   // Open scout
+   if(!scoutOpened)
+   {
+      double scoutLots = NormalizeLot(BaseLots * ScoutLotsMultiplier);
+      ENUM_ORDER_TYPE type = (oppositeDir == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+
+      int opened = OpenBasket(type, ScoutTrades, scoutLots, "Scout");
+      if(opened > 0)
+      {
+         scoutOpened = true;
+         state = STATE_SCOUT;
+         Print("PRESSURE -> SCOUT. Scout trades opened=", opened,
+               " lots=", scoutLots);
+      }
+      else
+      {
+         Print("PRESSURE failed to open scout.");
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| STATE_SCOUT                                                      |
+//+------------------------------------------------------------------+
+void HandleScout(int signal, double atrPoints)
+{
+   int total = CountMyPositions();
+   if(total == 0)
+   {
+      ResetState();
+      return;
+   }
+
+   // If market snaps back in favor of original side, kill scout and return
+   if(signal == initialDir)
+   {
+      double scoutProfit = GetProfitByCommentContains("Scout");
+      ClosePositionsByCommentContains("Scout");
+      scoutOpened = false;
+      state = STATE_ATTACK;
+      Print("SCOUT aborted. Signal reverted. Scout profit=", scoutProfit);
+      return;
+   }
+
+   // If opposite move still alive, build partial defense
+   if(!defenseOpened)
+   {
+      // Optionally re-check ATR before defense
+      if(UseATRFilter && atrPoints < MinATRPoints)
+      {
+         Print("SCOUT waiting; ATR too low for defense.");
+         return;
+      }
+
+      double defenseLots = NormalizeLot(BaseLots * DefenseLotsMultiplier);
+      ENUM_ORDER_TYPE type = (oppositeDir == 1 ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+
+      int opened = OpenBasket(type, DefenseTrades, defenseLots, "Defense");
+      if(opened > 0)
+      {
+         defenseOpened = true;
+         state = STATE_DEFENSE;
+         Print("SCOUT -> DEFENSE. Partial hedge opened=", opened,
+               " lots=", defenseLots);
+      }
+      else
+      {
+         Print("SCOUT failed to open defense trades.");
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| STATE_DEFENSE                                                    |
+//+------------------------------------------------------------------+
+void HandleDefense(int signal)
+{
+   int total = CountMyPositions();
+   if(total == 0)
+   {
+      ResetState();
+      return;
+   }
+
+   // Start active cleanup once opposite side has profit
+   double defenseProfit = GetOppositeSideProfit();
+   if(defenseProfit >= RecoveryTriggerDollars)
+   {
+      int closed = CloseWorstOriginalTradesUsingOppositeProfit(defenseProfit);
+      if(closed > 0)
+      {
+         state = STATE_RECOVERY;
+         Print("DEFENSE -> RECOVERY. Closed worst original trades=", closed,
+               " using defenseProfit=", defenseProfit);
+      }
+   }
+
+   // If original signal fully comes back and opposite side is weak,
+   // optionally unload scout/defense side and return
+   if(signal == initialDir)
+   {
+      double oppProfit = GetOppositeSideProfit();
+      if(oppProfit > 0.0)
+      {
+         CloseProfitableOppositeSide();
+         state = STATE_ATTACK;
+         defenseOpened = false;
+         scoutOpened = false;
+         Print("DEFENSE resolved back to ATTACK. Profitable opposite side closed.");
+      }
+   }
+
+   // Escape condition
+   if(ShouldGoToEscape())
+   {
+      state = STATE_ESCAPE;
+      Print("DEFENSE -> ESCAPE.");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| STATE_RECOVERY                                                   |
+//+------------------------------------------------------------------+
+void HandleRecovery(int signal)
+{
+   int total = CountMyPositions();
+   if(total == 0)
+   {
+      ResetState();
+      return;
+   }
+
+   double defenseProfit = GetOppositeSideProfit();
+
+   if(defenseProfit >= RecoveryTriggerDollars)
+   {
+      int closed = CloseWorstOriginalTradesUsingOppositeProfit(defenseProfit);
+      if(closed > 0)
+         Print("RECOVERY closed worst original trades=", closed);
+   }
+
+   // If opposite side profits are strong, optionally take some
+   if(defenseProfit > RecoveryTriggerDollars * 2.0)
+   {
+      CloseOneBestOppositeTrade();
+   }
+
+   if(ShouldGoToEscape())
+   {
+      state = STATE_ESCAPE;
+      Print("RECOVERY -> ESCAPE.");
+      return;
+   }
+
+   // If signal realigns and opposite side has profit, lighten opposite side
+   if(signal == initialDir)
+   {
+      CloseProfitableOppositeSide();
+      if(GetOriginalCount() > 0)
+      {
+         state = STATE_ATTACK;
+         Print("RECOVERY -> ATTACK after opposite cleanup.");
+      }
+      else
+      {
+         state = STATE_ESCAPE;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| STATE_ESCAPE                                                     |
+//+------------------------------------------------------------------+
+void HandleEscape(int signal)
+{
+   int total = CountMyPositions();
+   if(total == 0)
+   {
+      ResetState();
+      return;
+   }
+
+   double net = GetBasketProfit();
+   int originalCount = GetOriginalCount();
+   int oppositeCount = GetOppositeCount();
+
+   // Main smart escape:
+   // if original trapped side is mostly cleaned and basket is >= small profit/BE, flatten
+   if(originalCount <= EscapeRemainingOriginal && net >= EscapeSmallNetProfit)
+   {
+      Print("ESCAPE condition met. originalCount=", originalCount,
+            " oppositeCount=", oppositeCount,
+            " net=", net, ". Closing all.");
+      CloseAllPositions();
+      ResetState();
+      return;
+   }
+
+   // Also if signal returns to opposite side and net >= 0, flatten
+   if(net >= 0.0)
+   {
+      Print("ESCAPE flattening at net=", net);
+      CloseAllPositions();
+      ResetState();
+      return;
+   }
+
+   // If not ready, keep trying to clean
+   double defenseProfit = GetOppositeSideProfit();
+   if(defenseProfit >= RecoveryTriggerDollars)
+      CloseWorstOriginalTradesUsingOppositeProfit(defenseProfit);
+}
+
+//====================================================
+// CORE TRADE HELPERS
+//====================================================
+
+//+------------------------------------------------------------------+
+//| Open basket                                                      |
+//+------------------------------------------------------------------+
+int OpenBasket(ENUM_ORDER_TYPE type, int tradeCount, double lots, string comment)
+{
+   int success = 0;
+
+   for(int i = 0; i < tradeCount; i++)
+   {
+      bool result = false;
+
+      if(type == ORDER_TYPE_BUY)
+         result = trade.Buy(lots, _Symbol, 0.0, 0.0, 0.0, comment);
+      else
+         result = trade.Sell(lots, _Symbol, 0.0, 0.0, 0.0, comment);
+
+      if(result)
+         success++;
+      else
+         Print("OpenBasket failed #", i + 1, " [", comment, "]: ",
+               trade.ResultRetcodeDescription());
+   }
+
+   return success;
+}
+
+//+------------------------------------------------------------------+
+//| Close all positions                                              |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+{
+   bool found;
+   do
+   {
+      found = false;
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0) continue;
+         if(!PositionSelectByTicket(ticket)) continue;
+
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+            PositionGetInteger(POSITION_MAGIC) != Magic)
+            continue;
+
+         found = true;
+
+         if(trade.PositionClose(ticket))
+            Print("Closed: ", ticket);
+         else
+            Print("Close failed: ", ticket, " | ", trade.ResultRetcodeDescription());
+      }
+   }
+   while(CountMyPositions() > 0 && found);
+}
+
+//+------------------------------------------------------------------+
+//| Reset state                                                      |
+//+------------------------------------------------------------------+
+void ResetState()
+{
+   state = STATE_IDLE;
+   initialDir = 0;
+   oppositeDir = 0;
+   pressureStartBarTime = 0;
+   pressureBarsCount = 0;
+   scoutOpened = false;
+   defenseOpened = false;
+
+   Print("State reset -> IDLE");
+}
+
+//====================================================
+// SIGNAL / INDICATOR HELPERS
+//====================================================
+
+//+------------------------------------------------------------------+
+//| Get closed bar SAR signal                                        |
+//+------------------------------------------------------------------+
+int GetClosedBarSignal()
+{
+   double sar[1];
+   double closePrice[1];
+
+   if(CopyBuffer(sarHandle, 0, 1, 1, sar) < 1)
+      return 0;
+
+   if(CopyClose(_Symbol, _Period, 1, 1, closePrice) < 1)
+      return 0;
+
+   if(sar[0] < closePrice[0])
+      return 1;
+
+   if(sar[0] > closePrice[0])
+      return -1;
+
+   return 0;
+}
+
+//+------------------------------------------------------------------+
+//| Get ATR in points                                                |
+//+------------------------------------------------------------------+
+double GetATRPoints()
+{
+   double atr[1];
+   if(CopyBuffer(atrHandle, 0, 1, 1, atr) < 1)
+      return 0.0;
+
+   return atr[0] / _Point;
+}
+
+//====================================================
+// POSITION STATS
+//====================================================
+
+//+------------------------------------------------------------------+
+//| Count my positions                                               |
+//+------------------------------------------------------------------+
+int CountMyPositions()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == Magic)
+         count++;
+   }
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Count buy/sell positions                                         |
+//+------------------------------------------------------------------+
+void CountBuySell(int &buys, int &sells)
+{
+   buys = 0;
+   sells = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == Magic)
+      {
+         long type = PositionGetInteger(POSITION_TYPE);
+         if(type == POSITION_TYPE_BUY) buys++;
+         else if(type == POSITION_TYPE_SELL) sells++;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Net basket profit                                                |
+//+------------------------------------------------------------------+
+double GetBasketProfit()
+{
+   double total = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) == _Symbol &&
+         PositionGetInteger(POSITION_MAGIC) == Magic)
+      {
+         total += PositionGetDouble(POSITION_PROFIT);
+      }
+   }
+
+   return total;
+}
+
+//+------------------------------------------------------------------+
+//| Avg price by direction                                           |
+//+------------------------------------------------------------------+
+double GetAveragePriceByDirection(int dir)
+{
+   double totalVolume = 0.0;
+   double weightedPrice = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      double vol = PositionGetDouble(POSITION_VOLUME);
+      double price = PositionGetDouble(POSITION_PRICE_OPEN);
+
+      if((dir == 1 && type == POSITION_TYPE_BUY) ||
+         (dir == -1 && type == POSITION_TYPE_SELL))
+      {
+         totalVolume += vol;
+         weightedPrice += price * vol;
+      }
+   }
+
+   if(totalVolume <= 0.0)
+      return 0.0;
+
+   return weightedPrice / totalVolume;
+}
+
+//+------------------------------------------------------------------+
+//| Original side count                                              |
+//+------------------------------------------------------------------+
+int GetOriginalCount()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((initialDir == 1 && type == POSITION_TYPE_BUY) ||
+         (initialDir == -1 && type == POSITION_TYPE_SELL))
+      {
+         count++;
+      }
+   }
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Opposite side count                                              |
+//+------------------------------------------------------------------+
+int GetOppositeCount()
+{
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((oppositeDir == 1 && type == POSITION_TYPE_BUY) ||
+         (oppositeDir == -1 && type == POSITION_TYPE_SELL))
+      {
+         count++;
+      }
+   }
+   return count;
+}
+
+//+------------------------------------------------------------------+
+//| Profit of opposite side                                          |
+//+------------------------------------------------------------------+
+double GetOppositeSideProfit()
+{
+   double total = 0.0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((oppositeDir == 1 && type == POSITION_TYPE_BUY) ||
+         (oppositeDir == -1 && type == POSITION_TYPE_SELL))
+      {
+         total += PositionGetDouble(POSITION_PROFIT);
+      }
+   }
+   return total;
+}
+
+//+------------------------------------------------------------------+
+//| Profit by comment contains                                       |
+//+------------------------------------------------------------------+
+double GetProfitByCommentContains(string text)
+{
+   double total = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      string cmt = PositionGetString(POSITION_COMMENT);
+      if(StringFind(cmt, text) >= 0)
+         total += PositionGetDouble(POSITION_PROFIT);
+   }
+
+   return total;
+}
+
+//====================================================
+// RECOVERY / CLEANUP HELPERS
+//====================================================
+
+//+------------------------------------------------------------------+
+//| Close positions whose comment contains text                      |
+//+------------------------------------------------------------------+
+void ClosePositionsByCommentContains(string text)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      string cmt = PositionGetString(POSITION_COMMENT);
+      if(StringFind(cmt, text) >= 0)
+      {
+         if(trade.PositionClose(ticket))
+            Print("Closed [", text, "]: ", ticket);
+         else
+            Print("Failed closing [", text, "]: ", ticket, " | ",
+                  trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close most profitable opposite trade                             |
+//+------------------------------------------------------------------+
+void CloseOneBestOppositeTrade()
+{
+   ulong bestTicket = 0;
+   double bestProfit = 0.0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((oppositeDir == 1 && type == POSITION_TYPE_BUY) ||
+         (oppositeDir == -1 && type == POSITION_TYPE_SELL))
+      {
+         double p = PositionGetDouble(POSITION_PROFIT);
+         if(p > bestProfit)
+         {
+            bestProfit = p;
+            bestTicket = ticket;
+         }
+      }
+   }
+
+   if(bestTicket > 0)
+   {
+      if(trade.PositionClose(bestTicket))
+         Print("Closed one best opposite trade: ", bestTicket,
+               " profit=", bestProfit);
+      else
+         Print("Failed to close best opposite trade: ", bestTicket, " | ",
+               trade.ResultRetcodeDescription());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close profitable opposite side                                   |
+//+------------------------------------------------------------------+
+void CloseProfitableOppositeSide()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0) continue;
+      if(!PositionSelectByTicket(ticket)) continue;
+
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+         PositionGetInteger(POSITION_MAGIC) != Magic)
+         continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((oppositeDir == 1 && type == POSITION_TYPE_BUY) ||
+         (oppositeDir == -1 && type == POSITION_TYPE_SELL))
+      {
+         double profit = PositionGetDouble(POSITION_PROFIT);
+         if(profit > 0.0)
+         {
+            if(trade.PositionClose(ticket))
+               Print("Closed profitable opposite trade: ", ticket, " p=", profit);
+            else
+               Print("Failed closing opposite trade: ", ticket, " | ",
+                     trade.ResultRetcodeDescription());
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close worst original trades using opposite-side profit           |
+//+------------------------------------------------------------------+
+int CloseWorstOriginalTradesUsingOppositeProfit(double availableProfit)
+{
+   int closedCount = 0;
+   int attempts = 0;
+
+   while(attempts < MaxWorstTradesPerBar)
+   {
+      ulong worstTicket = 0;
+      double worstLoss = 0.0;
+
+      // find worst original trade
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0) continue;
+         if(!PositionSelectByTicket(ticket)) continue;
+
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol ||
+            PositionGetInteger(POSITION_MAGIC) != Magic)
+            continue;
+
+         long type = PositionGetInteger(POSITION_TYPE);
+         if((initialDir == 1 && type == POSITION_TYPE_BUY) ||
+            (initialDir == -1 && type == POSITION_TYPE_SELL))
+         {
+            double p = PositionGetDouble(POSITION_PROFIT);
+            if(p < worstLoss)
+            {
+               worstLoss = p;
+               worstTicket = ticket;
+            }
+         }
+      }
+
+      if(worstTicket == 0)
+         break;
+
+      double required = MathAbs(worstLoss) + WorstTradeCloseBuffer;
+
+      if(availableProfit < required)
+         break;
+
+      if(trade.PositionClose(worstTicket))
+      {
+         Print("Closed worst original trade: ", worstTicket,
+               " loss=", worstLoss,
+               " using opposite-side profit=", availableProfit);
+
+         availableProfit -= MathAbs(worstLoss);
+         closedCount++;
+      }
+      else
+      {
+         Print("Failed closing worst original trade: ", worstTicket, " | ",
+               trade.ResultRetcodeDescription());
+         break;
+      }
+
+      attempts++;
+   }
+
+   return closedCount;
+}
+
+//+------------------------------------------------------------------+
+//| Escape trigger                                                   |
+//+------------------------------------------------------------------+
+bool ShouldGoToEscape()
+{
+   int originalCount = GetOriginalCount();
+   double net = GetBasketProfit();
+
+   if(originalCount <= EscapeRemainingOriginal && net >= EscapeSmallNetProfit)
+      return true;
+
+   return false;
+}
+
+//====================================================
+// UTILITIES
+//====================================================
+
+//+------------------------------------------------------------------+
+//| Normalize lot                                                    |
+//+------------------------------------------------------------------+
+double NormalizeLot(double lots)
+{
+   double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+   double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+   double stepLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(stepLot <= 0.0)
+      stepLot = 0.01;
+
+   lots = MathMax(minLot, lots);
+   lots = MathMin(maxLot, lots);
+
+   lots = MathFloor(lots / stepLot) * stepLot;
+   return NormalizeDouble(lots, 2);
+}
